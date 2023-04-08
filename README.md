@@ -8,6 +8,15 @@ Launch Minecraft Server.bat is simply a batch file that you can point to with a 
 I'm just a dad who wanted my 5 kids to be able to play Minecraft together without having to fight over which of their worlds they were going to join. Now they can all build in one family world no matter who is playing at that time. As such, I didn't want the server running all the time, don't have dedicated hardware for it, etc. With this set up, I have a simple icon on our family desktop that any kid can launch and everything just works.
 
 
+FEATURES
+--------
+1) Launches the server in a manner that allows the script to send and receive commands to/from the server.
+2) Prevents the PC from sleeping while the Minecraft server is running.
+3) Backs up the world at configurable frequency. Unlike all other wrappers I found, this uses interactive features native to Bedrock Server that do NOT require the server to be shut down!
+4) Shut down the server if no one is online for a configurable time period.
+5) Automatically checks for and upgrades the server on launch. (Since this script is written for home use, expectation isn't that the server runs for days on end.)
+
+
 INSTALLATION STEPS
 ------------------
 
