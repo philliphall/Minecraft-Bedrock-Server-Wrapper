@@ -304,7 +304,7 @@ function Update-Server {
     try {
         $request = Invoke-Webrequest -Uri "https://www.minecraft.net/en-us/download/server/bedrock" -UseBasicParsing
         $download_link = $request.Links | ? class -match "btn" | ? href -match "bin-win/bedrock" | select -ExpandProperty href
-        $online_version = $download_link.split("/")[4].split("-")[2].replace(".zip", "")
+        $online_version = $download_link.split("/")[5].split("-")[2].replace(".zip", "")
         Write-Host "Online version found: $($online_version)" -ForegroundColor $scriptColor
     }
     catch {
