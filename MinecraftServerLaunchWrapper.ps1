@@ -5,15 +5,15 @@
 #  2) Prevent PC from sleeping.
 #  3) Backup periodically (No shutdown necessary!)
 #  4) Shut down server if no one online for xx min.
-#  5) Automatically upgrade server on launch. (Since this script is written for home use, expectation isn't that the server runs for days on end.)
+#  5) Automatic server updates.
 # 
 # And maybe later...
-#  1) Warn before shutdown. 
-#  2) Incremental backup scheme
-#  3) Timestamp logs and maybe even write to logfile
+#  6) Warn before shutdown. 
+#  7) Incremental backup scheme
+#  8) Timestamp logs and maybe even write to logfile
 # 
 # And maybe never...
-#  1) Use the TypeScript / node.js API instead. https://learn.microsoft.com/en-us/minecraft/creator/documents/scriptingservers
+#  9) Use the TypeScript / node.js API instead. https://learn.microsoft.com/en-us/minecraft/creator/documents/scriptingservers
 #
 #
 # Known Issues
@@ -25,9 +25,8 @@
 ###################################################
 
 ### Configuration Variables
-$sleepSetting   = 10 # What should we reset the sleep timer to before we quit
-$serverLocation = 'C:\Minecraft Server' # Directory where bedrock_server.exe lives
-$backupLocation = 'C:\Minecraft Server Backups' # Directory to store backup files - should not be inside $serverLocation (or vice versa)
+$serverLocation = 'D:\Minecraft Server' # Directory where bedrock_server.exe lives
+$backupLocation = 'D:\Minecraft Server Backups' # Directory to store backup files - should not be inside $serverLocation (or vice versa)
 $backupMinutes  = 10 # How frequently after starting to create automatic backups
 $maxBackups     = 90 # Maximum number of backup archives before oldest one gets deleted
 $idleShutdown   = 10 # After how many minutes of no one being logged in should we stop the server
@@ -57,6 +56,25 @@ $DebugPreference = 'SilentlyContinue'
 $WarningPreference = 'Continue'
 $VerbosePreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
+
+
+### Get original sleep Setting# Run the powercfg query command and capture its output
+$output = & powercfg /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE
+# Parse the output to find the "Current AC Power Setting Index"
+foreach ($line in $output) {
+    if ($line -match "Current AC Power Setting Index:\s+0x([0-9a-fA-F]+)") {
+        # Convert the hex value to a decimal number
+        $currentACSettingSeconds = [convert]::ToInt32($matches[1], 16)
+        break
+    }
+}
+if ($null -ne $currentACSettingSeconds) {
+    # Convert seconds to minutes
+    $sleepSetting = [math]::Floor($currentACSettingSeconds / 60)
+    Write-Output "Current AC sleep timeout: $sleepSetting minutes."
+} else {
+    Write-Output "Unable to find the current AC sleep timeout setting."
+}
 
 
 ### Main
@@ -230,7 +248,6 @@ function Create-Backup {
         }
         
         # Process the list of files to backup.
-        Write-Host "Backing up files..." -ForegroundColor $scriptColor
         $timestamp = Get-Date -Format "yyyy-MM-dd_HH_mm"
         $null = mkdir $backupLocation\$timestamp
         foreach ($line in $returnstring -split ', ') {
@@ -242,7 +259,6 @@ function Create-Backup {
         }
         
         # Set the server back to normal mode.
-        Write-Host "Resuming server normal operation." -ForegroundColor $scriptColor
         $streamWriter.WriteLine("save resume")
         while ($held -eq 1) { # Wait to get confirmation of "Changes to the world are resumed."
             while ($task.IsCompleted -eq $false) { Start-Sleep -Milliseconds 1 }
@@ -254,7 +270,6 @@ function Create-Backup {
         }
 
         # Compress and clean up
-        Write-Host "Compressing and cleaning up." -ForegroundColor $scriptColor
         Compress-Archive -Path $backupLocation\$timestamp\* -DestinationPath ($backupLocation + "\" + $timestamp + ".zip")
         Remove-Item -LiteralPath $backupLocation\$timestamp -Force -Recurse
         $items = Get-ChildItem $backupLocation
@@ -283,6 +298,7 @@ function Update-Server {
             Then download it and install the newest version. 
     #>
 
+
     #Setup Folders
     if(!(Test-Path -path "$backupLocation/Downloads")){
         Write-Host "Didn't find the Download folder. Creating it now" -ForegroundColor $scriptColor
@@ -300,23 +316,23 @@ function Update-Server {
     Write-Host "Current version found: $($local_version)" -ForegroundColor $scriptColor
 
     # Online update available?
-    Write-Host "Checking for availabe version online" -ForegroundColor $scriptColor
+    Write-Host "Checking for available version online" -ForegroundColor $scriptColor
     try {
-        $request = Invoke-Webrequest -Uri "https://www.minecraft.net/en-us/download/server/bedrock" -UseBasicParsing
-        $download_link = $request.Links | ? class -match "btn" | ? href -match "bin-win/bedrock" | select -ExpandProperty href
-        $online_version = $download_link.split("/")[5].split("-")[2].replace(".zip", "")
+        # Get latest stable version info from Bedrock-OSS
+        $versions = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/Bedrock-OSS/BDS-Versions/main/versions.json"
+        $online_version = $versions.windows.stable
+
         Write-Host "Online version found: $($online_version)" -ForegroundColor $scriptColor
     }
     catch {
-        Write-Host -Message "Unable to get online version. Abandoning update attempt." -ForegroundColor Red
+        Write-Host "Unable to get online version. Abandoning update attempt." -ForegroundColor Red
         return "Error"
     }
 
-
-    # If already up to date. 
+    # If already up to date.
     if ($local_version -eq $online_version) {
         Write-Host "Local version and Online version are identical." -ForegroundColor $scriptColor
-	    return "Already current."
+        return "Already current."
     }
 
 
@@ -326,31 +342,52 @@ function Update-Server {
         
         try {
             # Stopping the Minecraft server
-            if ((get-process "bedrock_server.exe" -ea SilentlyContinue) -ne $Null) {
+            if ($Null -ne (get-process "bedrock_server.exe" -ea SilentlyContinue)) {
                 Write-Warning -Message "Looks like an instance of the servier is already running! Stopping the Minecraft service..."
                 Get-Process | ? {$_.ProcessName -eq "bedrock_server.exe"} | Stop-Process -Force  # Fore Stop Minecraft Server
                 start-sleep -s 2
             }
 
             # Backup the Minecraft server
-            Write-Host "Initiating server backup" -ForegroundColor $scriptColor
-            if(!(Test-Path -path "$backupLocation\ServerVersionBackup")){
-                Write-Host "Didn't find the backup folder. Creating it now" -ForegroundColor $scriptColor
-                New-Item -Path "$backupLocation\ServerVersionBackup" -ItemType Directory
-            }
-            Write-Host "Copying the current server into the backup folder" -ForegroundColor $scriptColor
-            $backup_folder = "$backupLocation\ServerVersionBackup\bedrock-server-$($local_version)"
-            Copy-Item -Path "$serverLocation" -Destination $backup_folder -recurse
-            #Start-Sleep -s 5
-
-            # Removing old server files from $serverLocation
-            #Write-Warning -Message "Removing the current version of the server!"
-            #Remove-Item -Path "$serverLocation/bedrock-server" -Recurse -Force
-
+            # Write-Host "Initiating server backup"
+            # if(!(Test-Path -path "$backupLocation\ServerVersionBackup")){
+            #     Write-Host "Didn't find the backup folder. Creating it now" -ForegroundColor $scriptColor
+            #     New-Item -Path "$backupLocation\ServerVersionBackup" -ItemType Directory
+            # }
+            # Write-Host "Copying the current server into the backup folder" -ForegroundColor $scriptColor
+            # $backup_folder = "$backupLocation\ServerVersionBackup\bedrock-server-$($local_version)"
+            # Copy-Item -Path "$serverLocation" -Destination $backup_folder -recurse
     
             # Downloading and Extracting the new version of Minecraft
-            Write-Host "Downloading the new version of the server" -ForegroundColor $scriptColor
-            Invoke-WebRequest -Uri $download_link -OutFile "$backupLocation\Downloads\bedrock-server.zip" -UseBasicParsing
+            $info = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/Bedrock-OSS/BDS-Versions/main/windows/$online_version.json"
+            $download_link = $info.download_url
+            $localZip = "$backupLocation\Downloads\bedrock-server.zip"
+            try {
+                $response = Invoke-WebRequest -Uri $download_link -Method Head
+                $expectedSize = [int64]$response.Headers["Content-Length"]
+            } catch {
+                Write-Warning "Failed to get expected file size from the server. Assuming 30 MB."
+                $expectedSize = 31457280
+            }
+            Write-Host "Downloading the new version of the server from $download_link. Expected size: $expectedSize." -ForegroundColor $scriptColor
+            try {
+                Invoke-WebRequest -Uri $download_link -OutFile "$localZip" -UseBasicParsing
+                $actualSize = (Get-Item "$localZip").Length
+                if ($actualSize -eq $expectedSize) {
+                    Write-Host "Download completed successfully and file size matches." -ForegroundColor $scriptColor
+                } else {
+                    throw "Downloaded file size ($actualSize) does not match expected size ($expectedSize)."
+                }
+            } catch {
+                Write-Warning "Automatic download failed: $_"
+                Write-Host "Please manually download the server from:"
+                Write-Host $downloadUrl
+                Write-Host "Save it as $localZip"
+                do {
+                    $null = Read-Host "Press Enter after you have downloaded and placed the file in the correct location"
+                } until (Test-Path $localZip)
+                Write-Host "File detected. Continuing with the update."
+            }
             Write-Host "Expanding the folder to the server folder" -ForegroundColor $scriptColor
             #[System.IO.Compression.ZipFile]::ExtractToDirectory("$($backupLocation)\Downloads\bedrock-server.zip", $serverLocation, [boolean]$true) # Doesn't work - requires .NET Core version not included in PS any more.
             Expand-Archive -Path "$backupLocation\Downloads\bedrock-server.zip" -DestinationPath $serverLocation -Force
