@@ -270,8 +270,8 @@ function Create-Backup {
         }
 
         # Compress and clean up
-        Compress-Archive -Path $backupLocation\$timestamp\* -DestinationPath ($backupLocation + "\" + $timestamp + ".zip")
-        Remove-Item -LiteralPath $backupLocation\$timestamp -Force -Recurse
+        Compress-Zip -SourcePath "$backupLocation\$timestamp" -ZipPath ($backupLocation + "\" + $timestamp + ".zip")
+        Remove-Item -LiteralPath "$backupLocation\$timestamp" -Force -Recurse
         $items = Get-ChildItem $backupLocation
         if ($items.Count -gt $maxBackups) {
             $items | Sort-Object LastWriteTime -Descending | Select-Object -Last 1 | Remove-Item
@@ -349,19 +349,21 @@ function Update-Server {
             }
 
             # Backup the Minecraft server
-            # Write-Host "Initiating server backup"
-            # if(!(Test-Path -path "$backupLocation\ServerVersionBackup")){
-            #     Write-Host "Didn't find the backup folder. Creating it now" -ForegroundColor $scriptColor
-            #     New-Item -Path "$backupLocation\ServerVersionBackup" -ItemType Directory
-            # }
-            # Write-Host "Copying the current server into the backup folder" -ForegroundColor $scriptColor
-            # $backup_folder = "$backupLocation\ServerVersionBackup\bedrock-server-$($local_version)"
-            # Copy-Item -Path "$serverLocation" -Destination $backup_folder -recurse
+            Write-Host "Initiating server backup"
+            if(!(Test-Path -path "$backupLocation\ServerVersionBackup")){
+                Write-Host "Didn't find the backup folder. Creating it now" -ForegroundColor $scriptColor
+                New-Item -Path "$backupLocation\ServerVersionBackup" -ItemType Directory
+            }
+            Write-Host "Copying the current server into the backup folder" -ForegroundColor $scriptColor
+            $backup_folder = "$backupLocation\ServerVersionBackup\bedrock-server-$($local_version)"
+            Copy-Item -Path "$serverLocation" -Destination $backup_folder -recurse
     
             # Downloading and Extracting the new version of Minecraft
             $info = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/Bedrock-OSS/BDS-Versions/main/windows/$online_version.json"
             $download_link = $info.download_url
-            $localZip = "$backupLocation\Downloads\bedrock-server.zip"
+            $localZipName = "bedrock-server-$online_version.zip"
+            $localZip = "$backupLocation\Downloads\$localZipName"
+
             try {
                 $response = Invoke-WebRequest -Uri $download_link -Method Head
                 $expectedSize = [int64]$response.Headers["Content-Length"]
@@ -369,29 +371,33 @@ function Update-Server {
                 Write-Warning "Failed to get expected file size from the server. Assuming 30 MB."
                 $expectedSize = 31457280
             }
-            Write-Host "Downloading the new version of the server from $download_link. Expected size: $expectedSize." -ForegroundColor $scriptColor
-            try {
-                Invoke-WebRequest -Uri $download_link -OutFile "$localZip" -UseBasicParsing
-                $actualSize = (Get-Item "$localZip").Length
-                if ($actualSize -eq $expectedSize) {
-                    Write-Host "Download completed successfully and file size matches." -ForegroundColor $scriptColor
-                } else {
-                    throw "Downloaded file size ($actualSize) does not match expected size ($expectedSize)."
-                }
-            } catch {
-                Write-Warning "Automatic download failed: $_"
-                Write-Host "Please manually download the server from:"
-                Write-Host $downloadUrl
-                Write-Host "Save it as $localZip"
-                do {
-                    $null = Read-Host "Press Enter after you have downloaded and placed the file in the correct location"
-                } until (Test-Path $localZip)
-                Write-Host "File detected. Continuing with the update."
-            }
-            Write-Host "Expanding the folder to the server folder" -ForegroundColor $scriptColor
-            #[System.IO.Compression.ZipFile]::ExtractToDirectory("$($backupLocation)\Downloads\bedrock-server.zip", $serverLocation, [boolean]$true) # Doesn't work - requires .NET Core version not included in PS any more.
-            Expand-Archive -Path "$backupLocation\Downloads\bedrock-server.zip" -DestinationPath $serverLocation -Force
 
+            # Check if the correct ZIP already exists
+            if ((Test-Path $localZip -PathType Leaf) -and ((Get-Item $localZip).Length -eq $expectedSize)) {
+                Write-Host "Found existing ZIP for version $online_version with correct size. Skipping download." -ForegroundColor $scriptColor
+            } else {
+                Write-Host "Downloading the new version of the server from $download_link. Expected size: $expectedSize." -ForegroundColor $scriptColor
+                try {
+                    Invoke-WebRequest -Uri $download_link -OutFile "$localZip" -UseBasicParsing
+                    $actualSize = (Get-Item "$localZip").Length
+                    if ($actualSize -eq $expectedSize) {
+                        Write-Host "Download completed successfully and file size matches." -ForegroundColor $scriptColor
+                    } else {
+                        throw "Downloaded file size ($actualSize) does not match expected size ($expectedSize)."
+                    }
+                } catch {
+                    Write-Warning "Automatic download failed: $_"
+                    Write-Host "Please manually download the server from:"
+                    Write-Host $download_link
+                    Write-Host "Save it as $localZip"
+                    do {
+                        $null = Read-Host "Press Enter after you have downloaded and placed the file in the correct location"
+                    } until (Test-Path $localZip)
+                    Write-Host "File detected. Continuing with the update."
+                }
+            }
+
+            Expand-Zip-Overwrite -ZipPath $localZip -DestPath $serverLocation
 
             # Copying old Configurations files to the new server
             #Write-Host "Copying world files into new server"
@@ -414,11 +420,10 @@ function Update-Server {
             $null = New-Item $version_file -ItemType File -Force
             Add-Content -Path $version_file -Value "$($online_version)" -NoNewline
 
-
             # Compressing the backup server folder
             Write-Host "Compressing the backed up server version to conserve space" -ForegroundColor $scriptColor
             $string = "$($backup_folder).zip"
-            [IO.Compression.ZipFile]::CreateFromDirectory( $backup_folder, $string, 'Fastest', $false )
+            Compress-Zip -SourcePath $backup_folder -ZipPath $string
 
             # Removing the old uncompressed server files
             Write-Host "Remove uncompressed version of backup server" -ForegroundColor $scriptColor
@@ -449,5 +454,114 @@ function Update-Server {
     return "Shouldn't get here."
 }
 
+
+# --- ZIP Utility Selection and Efficiency ---
+
+# Global variable to store the best zip method
+$Global:ZipMethod = $null
+
+function Use-ZipMethod {
+    param (
+        [ValidateSet("ExpandArchive", "DotNet", "SevenZipLocal", "SevenZipPath")]
+        [string]$Method
+    )
+    $Global:ZipMethod = $Method
+}
+
+function Detect-ZipMethod {
+    # Try 7za.exe in script folder
+    if ($PSScriptRoot) {
+        $scriptDir = $PSScriptRoot
+    } elseif ($MyInvocation.PSScriptRoot) {
+        $scriptDir = $MyInvocation.PSScriptRoot
+    } else {
+        $scriptDir = Split-Path -Parent $PSCommandPath
+    }
+    $sevenZipLocal = Join-Path $scriptDir "7za.exe"
+    if (Test-Path $sevenZipLocal) {
+        Use-ZipMethod "SevenZipLocal"
+        return $sevenZipLocal
+    }
+
+    # Try 7z/7za in PATH
+    $sevenZipCmd = Get-Command 7z.exe -ErrorAction SilentlyContinue
+    if (-not $sevenZipCmd) { $sevenZipCmd = Get-Command 7za.exe -ErrorAction SilentlyContinue }
+    if ($sevenZipCmd) {
+        Use-ZipMethod "SevenZipPath"
+        return $sevenZipCmd.Source
+    }
+
+    # Try .NET ZipFile
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        $null = [IO.Compression.ZipFile]
+        Use-ZipMethod "DotNet"
+        return $null
+    } catch {}
+
+    # Fallback to Expand-Archive
+    Use-ZipMethod "ExpandArchive"
+    return $null
+}
+
+function Expand-Zip-Overwrite {
+    param (
+        [string]$ZipPath,
+        [string]$DestPath
+    )
+    if (-not $Global:ZipMethod) { $Global:SevenZipPath = Detect-ZipMethod }
+    switch ($Global:ZipMethod) {
+        "SevenZipLocal" {
+            & $Global:SevenZipPath x -y -o"$DestPath" "$ZipPath"
+        }
+
+        "SevenZipPath" {
+            & $Global:SevenZipPath x -y -o"$DestPath" "$ZipPath"
+        }
+
+        "DotNet" {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+            foreach ($entry in $zip.Entries) {
+                $target = Join-Path $DestPath $entry.FullName
+                if ($entry.Name) {
+                    $dir = Split-Path $target
+                    if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+                    $entry.ExtractToFile($target, $true) # $true = overwrite
+                } else {
+                    if (!(Test-Path $target)) { New-Item -ItemType Directory -Path $target | Out-Null }
+                }
+            }
+            $zip.Dispose()
+        }
+
+        "ExpandArchive" {
+            Expand-Archive -Path $ZipPath -DestinationPath $DestPath -Force
+        }
+    }
+}
+
+function Compress-Zip {
+    param (
+        [string]$SourcePath,
+        [string]$ZipPath
+    )
+    if (-not $Global:ZipMethod) { $Global:SevenZipPath = Detect-ZipMethod }
+    switch ($Global:ZipMethod) {
+        "SevenZipLocal" {
+            & $Global:SevenZipPath a -tzip "$ZipPath" "$SourcePath\*" | Out-Null
+        }
+        "SevenZipPath" {
+            & $Global:SevenZipPath a -tzip "$ZipPath" "$SourcePath\*" | Out-Null
+        }
+        "DotNet" {
+            [IO.Compression.ZipFile]::CreateFromDirectory($SourcePath, $ZipPath, 'Fastest', $false)
+        }
+        "ExpandArchive" {
+            Compress-Archive -Path "$SourcePath\*" -DestinationPath $ZipPath -Force
+        }
+    }
+}
+
+# --- END ZIP Utility Functionality ---
 
 MAIN
